@@ -1,70 +1,131 @@
 const express = require('express');
 const axios = require('axios');
-const mysql = require('mysql2');
+const mysql = require('mysql2/promise');
 
 // Configurações do banco de dados
-const db = mysql.createPool({
+const dbConfig = {
     host: 'sensordb.cpum6aqq2r5m.eu-north-1.rds.amazonaws.com',
     user: 'Cassiano',
     password: 'cassiano3241',
     database: 'distances_db'
-});
+};
 
-// Configurações do ThingSpeak
-const THINGSPEAK_API_KEY = '8PHTQ285VBUY0ANO';
-const THINGSPEAK_CHANNEL_ID = '2762979';
-const THINGSPEAK_URL = `https://api.thingspeak.com/channels/${THINGSPEAK_CHANNEL_ID}/feeds.json?api_key=${THINGSPEAK_API_KEY}&results=1`;
+// Configuração do ThingSpeak
+const THINGSPEAK_URL = 'https://api.thingspeak.com/channels/2762979/feeds.json?api_key=8PHTQ285VBUY0ANO&results=1';
+const FIXED_DISTANCE = 1.35; // Distância fixa, como exemplo (em metros)
 
 const app = express();
-const PORT = 9000;
+const port = 3000;
 
-// Distância fixa em cm
-const FIXED_DISTANCE_CM = 135;
+// Função para salvar as distâncias no banco de dados
+async function saveDistances() {
+  try {
+    console.log("Iniciando processo de verificação e salvamento de dados...");
 
-// Rota para obter dados do ThingSpeak e salvar no banco
-app.get('/save-distances', async (req, res) => {
-    try {
-        // Requisição ao ThingSpeak
-        const response = await axios.get(THINGSPEAK_URL);
-        const feeds = response.data.feeds;
+    // Requisição ao ThingSpeak
+    const response = await axios.get(THINGSPEAK_URL);
+    const data = response.data;
 
-        if (!feeds || feeds.length === 0) {
-            return res.status(404).send('Nenhum dado encontrado no ThingSpeak.');
-        }
-
-        // Extrair os valores das fields
-        const latestFeed = feeds[0];
-        const field1 = parseFloat(latestFeed.field1); // Distância local
-        const field2 = parseFloat(latestFeed.field2); // Distância remota
-
-        if (isNaN(field1) || isNaN(field2)) {
-            return res.status(400).send('Dados inválidos recebidos do ThingSpeak.');
-        }
-
-        // Calcular as distâncias
-        const localDistance = (FIXED_DISTANCE_CM - field1) / 100; // Converter para metros
-        const remoteDistance = (FIXED_DISTANCE_CM - field2) / 100; // Converter para metros
-
-        // Inserir no banco de dados
-        const sql = `INSERT INTO distances (local_distance, remote_distance) VALUES (?, ?)`;
-        db.query(sql, [localDistance, remoteDistance], (err, result) => {
-            if (err) {
-                console.error('Erro ao salvar no banco:', err);
-                return res.status(500).send('Erro ao salvar os dados no banco de dados.');
-            }
-            res.send({
-                message: 'Dados salvos com sucesso!',
-                data: { localDistance, remoteDistance },
-                dbResult: result
-            });
-        });
-    } catch (error) {
-        console.error('Erro ao acessar ThingSpeak:', error);
-        res.status(500).send('Erro ao acessar ThingSpeak.');
+    if (!data.feeds || data.feeds.length === 0) {
+      console.log("Nenhum dado encontrado no ThingSpeak.");
+      return;
     }
+
+    const feed = data.feeds[0];
+    const field1 = parseFloat(feed.field1); // Local sensor
+    const field2 = parseFloat(feed.field2); // Remote sensor
+
+    const localDistance = (field1 / -100 + FIXED_DISTANCE).toFixed(2); // Distância local em metros
+    const remoteDistance = (field2 / -100 + FIXED_DISTANCE).toFixed(2); // Distância remota em metros
+
+    console.log(`Distância local calculada: ${localDistance} m`);
+    console.log(`Distância remota calculada: ${remoteDistance} m`);
+
+    // Conexão com o banco de dados
+    const connection = await mysql.createConnection(dbConfig);
+
+    // Configurar fuso horário do MySQL para São Paulo
+    await connection.query("SET time_zone = '-03:00';");
+
+    // Inserção no banco usando NOW() para o timestamp atual
+    const [result] = await connection.execute(
+      "INSERT INTO distances (local_distance, remote_distance, created_at) VALUES (?, ?, NOW())",
+      [localDistance, remoteDistance]
+    );
+    console.log("Dados salvos no banco de dados com sucesso:", result);
+
+    // Fechar a conexão com o banco
+    await connection.end();
+  } catch (error) {
+    console.error("Erro ao salvar distâncias:", error.message);
+  }
+}
+
+// Rota para salvar as distâncias
+app.get('/save-distances', async (req, res) => {
+  try {
+    console.log("Fazendo a requisição para o ThingSpeak...");
+
+    // Requisição ao ThingSpeak
+    const response = await axios.get(THINGSPEAK_URL);
+    const data = response.data;
+
+    if (!data.feeds || data.feeds.length === 0) {
+      res.status(400).json({ message: "Nenhum dado encontrado no ThingSpeak." });
+      return;
+    }
+
+    const feed = data.feeds[0];
+    const field1 = parseFloat(feed.field1); // Local sensor
+    const field2 = parseFloat(feed.field2); // Remote sensor
+
+    const localDistance = (field1 / 100 - FIXED_DISTANCE).toFixed(2); // Distância local em metros
+    const remoteDistance = (field2 / 100 - FIXED_DISTANCE).toFixed(2); // Distância remota em metros
+
+    console.log(`Distância local calculada: ${localDistance} m`);
+    console.log(`Distância remota calculada: ${remoteDistance} m`);
+
+    // Conexão com o banco de dados
+    const connection = await mysql.createConnection(dbConfig);
+
+    // Configurar fuso horário do MySQL para São Paulo
+    await connection.query("SET time_zone = '-03:00';");
+
+    // Inserção no banco usando NOW() para o timestamp atual
+    const [result] = await connection.execute(
+      "INSERT INTO distances (local_distance, remote_distance, created_at) VALUES (?, ?, NOW())",
+      [localDistance, remoteDistance]
+    );
+
+    // Fechar a conexão com o banco
+    await connection.end();
+
+    console.log("Dados salvos no banco de dados com sucesso:", result);
+
+    // Resposta de sucesso
+    res.json({
+      message: 'Dados salvos com sucesso!',
+      data: { localDistance, remoteDistance, field1: field1, field2: field2 },
+      dbResult: result,
+    });
+  } catch (error) {
+    console.error("Erro ao salvar distâncias:", error.message);
+    res.status(500).json({ message: "Erro ao salvar distâncias." });
+  }
 });
 
+// Função de loop que verifica e salva as distâncias a cada minuto
+setInterval(saveDistances, 60000); // A cada 1 minuto (60000ms)
+
 // Inicializar o servidor
-app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+app.listen(port, () => {
+  console.log(`Servidor rodando na porta ${port}`);
+  console.log("Testando conexão com o banco de dados...");
+  mysql.createConnection(dbConfig)
+    .then(() => {
+      console.log("Conexão com o banco de dados bem-sucedida!");
+    })
+    .catch(err => {
+      console.error("Erro ao conectar com o banco de dados:", err.message);
+    });
 });
